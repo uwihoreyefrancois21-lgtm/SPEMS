@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const pool = require('../config/database');
 const { generateToken, asyncHandler, successResponse, errorResponse } = require('../utils/helpers');
 const { authenticate, isAdmin } = require('../middleware/auth');
-const { sendPasswordResetEmail } = require('../utils/emailService');
+const { sendPasswordResetEmail, sendTemporaryPasswordEmail, sendPaymentReminderEmail } = require('../utils/emailService');
 
 // @route   POST /api/auth/register
 // @desc    Register a new user
@@ -123,6 +123,16 @@ router.post('/approve-user/:userId', authenticate, isAdmin, asyncHandler(async (
     [userId]
   );
 
+  // Send payment instructions email to newly approved user
+  if (result.rows.length > 0 && result.rows[0].role !== 'admin') {
+    try {
+      await sendPaymentReminderEmail(result.rows[0].email, result.rows[0].username);
+    } catch (error) {
+      console.error('Failed to send payment instructions email:', error);
+      // Don't fail the approval if email fails
+    }
+  }
+
   successResponse(res, 200, {
     user: result.rows[0]
   }, 'User approved successfully');
@@ -166,26 +176,33 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
 
   if (userResult.rows.length === 0) {
     // For security, don't reveal if the email exists or not
-    return successResponse(res, 200, {}, 'If your email is registered, you will receive a password reset link');
+    return successResponse(res, 200, {}, 'If your email is registered, you will receive a temporary password');
   }
 
   const user = userResult.rows[0];
-  const resetToken = crypto.randomBytes(32).toString('hex');
-  const resetTokenExpires = new Date(Date.now() + 3600000); // 1 hour from now
+  const generateTemporaryPassword = () => {
+    const parts = [];
+    while (parts.join('').length < 12) {
+      parts.push(crypto.randomBytes(9).toString('base64').replace(/[^a-zA-Z0-9]/g, ''));
+    }
+    return parts.join('').slice(0, 12);
+  };
 
-  // Save reset token to database
+  const temporaryPassword = generateTemporaryPassword();
+  const saltRounds = 10;
+  const hashedPassword = await bcrypt.hash(temporaryPassword, saltRounds);
+
   await pool.query(
-    'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE id = $3',
-    [resetToken, resetTokenExpires, user.id]
+    'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
+    [hashedPassword, user.id]
   );
 
-  // Send email with reset link
   try {
-    await sendPasswordResetEmail(user.email, resetToken);
-    return successResponse(res, 200, {}, 'Password reset link sent to your email');
+    await sendTemporaryPasswordEmail(user.email, temporaryPassword);
+    return successResponse(res, 200, {}, 'Temporary password sent to your email');
   } catch (error) {
-    console.error('Error sending password reset email:', error);
-    return errorResponse(res, 500, 'Failed to send password reset email');
+    console.error('Error sending temporary password email:', error);
+    return errorResponse(res, 500, 'Failed to send temporary password');
   }
 }));
 
@@ -224,6 +241,50 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
   );
 
   successResponse(res, 200, {}, 'Password reset successful');
+}));
+
+// @route   PUT /api/auth/update-password
+// @desc    Update user password
+// @access  Private
+router.put('/update-password', authenticate, asyncHandler(async (req, res) => {
+  const { current_password, new_password, confirm_password } = req.body;
+  const userId = req.user.id;
+
+  // Validate input
+  if (!current_password || !new_password || !confirm_password) {
+    return errorResponse(res, 400, 'Current password, new password, and confirm password are required');
+  }
+
+  if (new_password !== confirm_password) {
+    return errorResponse(res, 400, 'New password and confirm password do not match');
+  }
+
+  if (new_password.length < 6) {
+    return errorResponse(res, 400, 'New password must be at least 6 characters long');
+  }
+
+  // Get current user
+  const userResult = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
+  if (userResult.rows.length === 0) {
+    return errorResponse(res, 404, 'User not found');
+  }
+
+  const user = userResult.rows[0];
+
+  // Verify current password
+  const isPasswordValid = await bcrypt.compare(current_password, user.password);
+  if (!isPasswordValid) {
+    return errorResponse(res, 400, 'Current password is incorrect');
+  }
+
+  // Hash new password
+  const saltRounds = 10;
+  const hashedPassword = await bcrypt.hash(new_password, saltRounds);
+
+  // Update password
+  await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
+
+  successResponse(res, 200, {}, 'Password updated successfully');
 }));
 
 module.exports = router;

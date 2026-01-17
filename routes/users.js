@@ -9,16 +9,29 @@ const { authenticate, isAdmin } = require('../middleware/auth');
 // @access  Private (Admin)
 router.get('/', authenticate, isAdmin, asyncHandler(async (req, res) => {
   const users = await pool.query(
-    `SELECT id, username, email, phone, role, approve_user, created_at 
-     FROM users 
-     ORDER BY created_at DESC`
+    `SELECT 
+       u.id,
+       u.username,
+       u.email,
+       u.phone,
+       u.role,
+       u.approve_user,
+       u.created_at,
+       (
+         SELECT up.status
+         FROM user_payments up
+         WHERE up.user_id = u.id
+           AND EXTRACT(MONTH FROM up.payment_month) = EXTRACT(MONTH FROM CURRENT_DATE)
+           AND EXTRACT(YEAR FROM up.payment_month) = EXTRACT(YEAR FROM CURRENT_DATE)
+         ORDER BY up.payment_month DESC
+         LIMIT 1
+       ) AS payment_status
+     FROM users u
+     ORDER BY u.created_at DESC`
   );
 
-  successResponse(res, 200, {
-    users: users.rows
-  }, 'Users retrieved successfully');
+  successResponse(res, 200, { users: users.rows }, 'Users retrieved successfully');
 }));
-
 // @route   GET /api/users/:id
 // @desc    Get user by ID (Admin only)
 // @access  Private (Admin)
@@ -26,9 +39,25 @@ router.get('/:id', authenticate, isAdmin, asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const user = await pool.query(
-    `SELECT id, username, email, phone, role, approve_user, created_at 
-     FROM users 
-     WHERE id = $1`,
+    `SELECT 
+       u.id,
+       u.username,
+       u.email,
+       u.phone,
+       u.role,
+       u.approve_user,
+       u.created_at,
+       (
+         SELECT up.status
+         FROM user_payments up
+         WHERE up.user_id = u.id
+           AND EXTRACT(MONTH FROM up.payment_month) = EXTRACT(MONTH FROM CURRENT_DATE)
+           AND EXTRACT(YEAR FROM up.payment_month) = EXTRACT(YEAR FROM CURRENT_DATE)
+         ORDER BY up.payment_month DESC
+         LIMIT 1
+       ) AS payment_status
+     FROM users u
+     WHERE u.id = $1`,
     [id]
   );
 

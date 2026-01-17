@@ -1,7 +1,42 @@
+const fs = require('fs');
+const path = require('path');
+
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  const raw = fs.readFileSync(envPath);
+  const isUtf16Le = raw.length >= 2 && raw[0] === 0xff && raw[1] === 0xfe;
+  if (isUtf16Le) {
+    const str = raw.toString('utf16le');
+    const normalized = str.replace(/\r\n/g, '\n');
+    const lines = normalized.split('\n').filter(Boolean);
+    for (const line of lines) {
+      if (line.trim().startsWith('#')) continue;
+      const idx = line.indexOf('=');
+      if (idx === -1) continue;
+      const key = line.slice(0, idx).trim();
+      let value = line.slice(idx + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (!process.env[key]) {
+        process.env[key] = value;
+      }
+    }
+  } else {
+    require('dotenv').config({ path: envPath });
+  }
+} else {
+  require('dotenv').config();
+}
+
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config();
+const crypto = require('crypto');
 const pool = require('./config/database');
+const { schedulePaymentChecks } = require('./utils/paymentScheduler');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -10,9 +45,18 @@ const taskRoutes = require('./routes/tasks');
 const transactionRoutes = require('./routes/transactions');
 const reportRoutes = require('./routes/reports');
 const userRoutes = require('./routes/users');
+const paymentRoutes = require('./routes/payments');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+let jwtSecretStatus = 'Missing';
+if (process.env.JWT_SECRET) {
+  jwtSecretStatus = 'Configured';
+} else if (process.env.NODE_ENV !== 'production') {
+  process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+  jwtSecretStatus = 'Ephemeral';
+}
 
 // Middleware
 app.use(cors());
@@ -32,6 +76,7 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -299,8 +344,36 @@ app.use((req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 SPEMS Server running on http://localhost:${PORT}`);
-  console.log(`📊 Database: Connected`);
-  console.log(`🔐 JWT Secret: ${process.env.JWT_SECRET ? 'Configured' : 'Not set!'}`);
-});
+const startServer = async () => {
+  if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+    console.error('🔐 JWT Secret: Missing (set JWT_SECRET)');
+    process.exit(1);
+  }
+
+  let dbStatus = 'Disconnected';
+  if (!process.env.DATABASE_URL) {
+    dbStatus = 'Not configured';
+  } else {
+    try {
+      await pool.query('SELECT 1');
+      dbStatus = 'Connected';
+    } catch (err) {
+      console.error('❌ Database connection failed:', err.message);
+    }
+  }
+
+  app.listen(PORT, () => {
+    console.log(`🚀 SPEMS Server running on http://localhost:${PORT}`);
+    console.log(`📊 Database: ${dbStatus}`);
+    console.log(`🔐 JWT Secret: ${jwtSecretStatus}`);
+    
+    // Start payment scheduler
+    try {
+      schedulePaymentChecks();
+    } catch (error) {
+      console.error('Failed to start payment scheduler:', error);
+    }
+  });
+};
+
+startServer();

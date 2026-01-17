@@ -22,25 +22,40 @@ const checkProjectAccess = async (projectId, userId, role) => {
   return { authorized: true };
 };
 
-// Helper function to update project totals
+// Helper function to update project totals (including tasks and transactions)
 const updateProjectTotals = async (projectId) => {
-  // Calculate totals
-  const incomeResult = await pool.query(
+  // Calculate totals from transactions
+  const incomeTransactionsResult = await pool.query(
     `SELECT COALESCE(SUM(amount), 0) as total 
      FROM transactions 
      WHERE project_id = $1 AND type = 'income'`,
     [projectId]
   );
 
-  const expenseResult = await pool.query(
+  const expenseTransactionsResult = await pool.query(
     `SELECT COALESCE(SUM(amount), 0) as total 
      FROM transactions 
      WHERE project_id = $1 AND type = 'expense'`,
     [projectId]
   );
 
-  const totalIncome = parseFloat(incomeResult.rows[0].total);
-  const totalExpense = parseFloat(expenseResult.rows[0].total);
+  // Calculate totals from tasks
+  const incomeTasksResult = await pool.query(
+    `SELECT COALESCE(SUM(cost), 0) as total 
+     FROM tasks 
+     WHERE project_id = $1 AND type = 'income'`,
+    [projectId]
+  );
+
+  const expenseTasksResult = await pool.query(
+    `SELECT COALESCE(SUM(cost), 0) as total 
+     FROM tasks 
+     WHERE project_id = $1 AND type = 'expense'`,
+    [projectId]
+  );
+
+  const totalIncome = parseFloat(incomeTransactionsResult.rows[0].total) + parseFloat(incomeTasksResult.rows[0].total);
+  const totalExpense = parseFloat(expenseTransactionsResult.rows[0].total) + parseFloat(expenseTasksResult.rows[0].total);
 
   // Update project totals (balance is auto-calculated)
   await pool.query(
@@ -52,49 +67,77 @@ const updateProjectTotals = async (projectId) => {
 };
 
 // @route   GET /api/transactions
-// @desc    Get all transactions (can filter by project_id)
+// @desc    Get all transactions (can filter by project_id and month)
 // @access  Private
 router.get('/', authenticate, asyncHandler(async (req, res) => {
-  const { project_id } = req.query;
+  const { project_id, month, year } = req.query;
   const userId = req.user.id;
   const role = req.user.role;
 
-  let transactions;
+  // Build WHERE conditions
+  let whereConditions = [];
+  let queryParams = [];
+  let paramIndex = 1;
+
+  // Handle project_id filter
   if (project_id) {
     // Check project access
     const accessCheck = await checkProjectAccess(project_id, userId, role);
     if (!accessCheck.authorized) {
       return errorResponse(res, 403, accessCheck.error);
     }
+    whereConditions.push(`t.project_id = $${paramIndex}`);
+    queryParams.push(project_id);
+    paramIndex++;
+  } else if (role !== 'admin') {
+    // Non-admin users see only their projects
+    whereConditions.push(`p.user_id = $${paramIndex}`);
+    queryParams.push(userId);
+    paramIndex++;
+  }
 
-    transactions = await pool.query(
-      `SELECT t.*, p.project_name 
-       FROM transactions t 
-       JOIN projects p ON t.project_id = p.id 
-       WHERE t.project_id = $1 
-       ORDER BY t.transaction_date DESC, t.created_at DESC`,
-      [project_id]
-    );
-  } else {
-    // Get all transactions for user's projects
-    if (role === 'admin') {
-      transactions = await pool.query(
-        `SELECT t.*, p.project_name 
-         FROM transactions t 
-         JOIN projects p ON t.project_id = p.id 
-         ORDER BY t.transaction_date DESC, t.created_at DESC`
-      );
+  // Handle month filter (format: YYYY-MM or just month number 1-12)
+  if (month) {
+    if (year) {
+      // Both month and year provided (e.g., month=1, year=2024)
+      whereConditions.push(`EXTRACT(MONTH FROM t.transaction_date) = $${paramIndex}`);
+      queryParams.push(parseInt(month));
+      paramIndex++;
+      whereConditions.push(`EXTRACT(YEAR FROM t.transaction_date) = $${paramIndex}`);
+      queryParams.push(parseInt(year));
+      paramIndex++;
+    } else if (month.includes('-')) {
+      // Format: YYYY-MM (e.g., "2024-01")
+      const [yearPart, monthPart] = month.split('-');
+      whereConditions.push(`EXTRACT(MONTH FROM t.transaction_date) = $${paramIndex}`);
+      queryParams.push(parseInt(monthPart));
+      paramIndex++;
+      whereConditions.push(`EXTRACT(YEAR FROM t.transaction_date) = $${paramIndex}`);
+      queryParams.push(parseInt(yearPart));
+      paramIndex++;
     } else {
-      transactions = await pool.query(
-        `SELECT t.*, p.project_name 
-         FROM transactions t 
-         JOIN projects p ON t.project_id = p.id 
-         WHERE p.user_id = $1 
-         ORDER BY t.transaction_date DESC, t.created_at DESC`,
-        [userId]
-      );
+      // Just month number (current year assumed)
+      const currentYear = new Date().getFullYear();
+      whereConditions.push(`EXTRACT(MONTH FROM t.transaction_date) = $${paramIndex}`);
+      queryParams.push(parseInt(month));
+      paramIndex++;
+      whereConditions.push(`EXTRACT(YEAR FROM t.transaction_date) = $${paramIndex}`);
+      queryParams.push(currentYear);
+      paramIndex++;
     }
   }
+
+  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+  let transactions;
+  transactions = await pool.query(
+    `SELECT t.*, p.project_name 
+     FROM transactions t 
+     JOIN projects p ON t.project_id = p.id 
+     ${whereClause}
+     ORDER BY t.transaction_date DESC, t.created_at DESC`,
+    queryParams
+  );
 
   successResponse(res, 200, {
     transactions: transactions.rows
