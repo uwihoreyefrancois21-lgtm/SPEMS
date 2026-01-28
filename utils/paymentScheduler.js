@@ -6,7 +6,7 @@ try {
 }
 
 const pool = require('../config/database');
-const { sendPaymentReminderEmail } = require('./emailService');
+const { sendPaymentReminderEmail, sendUpcomingBlockReminderEmail } = require('./emailService');
 
 // Run payment check daily at 9 AM
 const schedulePaymentChecks = () => {
@@ -38,6 +38,7 @@ const checkAndRemindPayments = async () => {
     );
 
     let remindersSent = 0;
+    let upcomingBlockRemindersSent = 0;
     let paymentsCreated = 0;
     let paymentsUpdated = 0;
 
@@ -181,9 +182,45 @@ const checkAndRemindPayments = async () => {
           console.error(`Failed to send reminder to ${user.email}:`, error);
         }
       }
+
+      // Upcoming block reminder: 2 days before 30-day window ends from last payment
+      const lastPaidAny = await pool.query(
+        `SELECT paid_at 
+         FROM user_payments 
+         WHERE user_id = $1 AND status = 'paid' AND paid_at IS NOT NULL
+         ORDER BY paid_at DESC
+         LIMIT 1`,
+        [user.id]
+      );
+
+      if (lastPaidAny.rows.length > 0) {
+        const paidAt = new Date(lastPaidAny.rows[0].paid_at);
+        const blockDate = new Date(paidAt);
+        blockDate.setDate(blockDate.getDate() + 30);
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const diffMs = blockDate.getTime() - today.getTime();
+        const daysUntilBlock = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+        if (daysUntilBlock === 2) {
+          try {
+            await sendUpcomingBlockReminderEmail(user.email, user.username, {
+              lastPaidAt: paidAt,
+              blockDate,
+              daysUntilBlock
+            });
+            upcomingBlockRemindersSent++;
+            console.log(`Upcoming block reminder (2 days) sent to ${user.email}`);
+          } catch (error) {
+            console.error(`Failed to send upcoming block reminder to ${user.email}:`, error);
+          }
+        }
+      }
     }
 
-    console.log(`Payment check completed. ${remindersSent} reminders sent, ${paymentsCreated} payments created, ${paymentsUpdated} payments updated.`);
+    console.log(`Payment check completed. ${remindersSent} monthly reminders sent, ${upcomingBlockRemindersSent} upcoming-block reminders sent, ${paymentsCreated} payments created, ${paymentsUpdated} payments updated.`);
   } catch (error) {
     console.error('Error in payment check:', error);
   }

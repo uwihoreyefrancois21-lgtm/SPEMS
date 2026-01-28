@@ -93,6 +93,54 @@ const sendPaymentReminderEmail = async (email, username) => {
   }
 };
 
+const sendUpcomingBlockReminderEmail = async (email, username, { lastPaidAt, blockDate, daysUntilBlock }) => {
+  try {
+    const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+    const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.sender = {
+      email: process.env.BREVO_SENDER_EMAIL || 'noreply@SPEMS.com',
+      name: process.env.BREVO_SENDER_NAME || 'Smart Project Earnings Management System'
+    };
+
+    const lastPaidLabel = lastPaidAt
+      ? new Date(lastPaidAt).toLocaleString()
+      : 'Not available';
+
+    const blockDateLabel = blockDate
+      ? new Date(blockDate).toLocaleString()
+      : 'Not available';
+
+    sendSmtpEmail.subject = 'Payment Due Soon - 2 Days Remaining';
+    sendSmtpEmail.htmlContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #1d4ed8;">Payment Reminder - ${daysUntilBlock} Day(s) Left</h2>
+        <p>Dear ${username || 'User'},</p>
+        <p>This is a friendly reminder that your 30-day access window is about to end.</p>
+        <div style="background-color: #fef3c7; border-left: 4px solid #facc15; padding: 12px 16px; border-radius: 6px; margin: 18px 0;">
+          <p style="margin: 4px 0;"><strong>Last payment:</strong> ${lastPaidLabel}</p>
+          <p style="margin: 4px 0;"><strong>Block on:</strong> ${blockDateLabel}</p>
+          <p style="margin: 4px 0; color: #b45309;"><strong>Days until block:</strong> ${daysUntilBlock}</p>
+        </div>
+        <p>Please make sure your next monthly payment is done in time to avoid your account being blocked.</p>
+        <h3 style="margin-top: 20px; color: #111827;">Payment Instructions</h3>
+        <div style="background-color: #eef6ff; padding: 15px; border-radius: 5px; margin: 12px 0;">
+          <p style="margin: 5px 0;"><strong>Amount:</strong> 15,000 RWF</p>
+          <p style="margin: 5px 0;"><strong>Pay To:</strong> NKUSI ENGINEERING GROUP LTD</p>
+          <p style="margin: 5px 0;">Use the phone number <strong>Press *182*8*1*7930391#</strong> when paying to ensure your payment is matched.</p>
+        </div>
+        <p style="color: #666; font-size: 12px;">This is an automated reminder. Please do not reply to this email.</p>
+      </div>
+    `;
+
+    await apiInstance.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error) {
+    console.error('Error sending upcoming block reminder email:', error);
+    throw new Error('Failed to send upcoming block reminder email');
+  }
+};
+
 const sendPaymentStatusUpdateEmail = async (email, username, { status, paymentMonth, amount, paymentMethod, paidAt }) => {
   try {
     const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
@@ -145,5 +193,6 @@ module.exports = {
   sendPasswordResetEmail,
   sendTemporaryPasswordEmail,
   sendPaymentReminderEmail,
-  sendPaymentStatusUpdateEmail
+  sendPaymentStatusUpdateEmail,
+  sendUpcomingBlockReminderEmail
 };

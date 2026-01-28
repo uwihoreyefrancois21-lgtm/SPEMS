@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../config/database');
 const { asyncHandler, successResponse, errorResponse } = require('../utils/helpers');
 const { authenticate, isAdmin } = require('../middleware/auth');
+const PDFDocument = require('pdfkit');
 
 // @route   GET /api/reports/project/:id
 // @desc    Get detailed report for a specific project
@@ -72,6 +73,398 @@ router.get('/project/:id', authenticate, asyncHandler(async (req, res) => {
       }
     }
   }, 'Project report retrieved successfully');
+}));
+
+// @route   GET /api/reports/project/:id/financial
+// @desc    Get financial report for a specific project with optional month/date range filters
+// @access  Private
+router.get('/project/:id/financial', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { month, year, start_date, end_date } = req.query;
+  const userId = req.user.id;
+  const role = req.user.role;
+
+  // Get project and check access
+  const projectResult = await pool.query(
+    'SELECT * FROM projects WHERE id = $1',
+    [id]
+  );
+
+  if (projectResult.rows.length === 0) {
+    return errorResponse(res, 404, 'Project not found');
+  }
+
+  const project = projectResult.rows[0];
+
+  if (role !== 'admin' && project.user_id !== userId) {
+    return errorResponse(res, 403, 'Access denied');
+  }
+
+  // Helper to build date filters for a given column
+  const buildDateFilter = (columnName) => {
+    const conditions = ['project_id = $1'];
+    const params = [id];
+    let paramIndex = 2;
+
+    if (start_date && end_date) {
+      conditions.push(`${columnName} >= $${paramIndex}`);
+      params.push(start_date);
+      paramIndex++;
+      conditions.push(`${columnName} <= $${paramIndex}`);
+      params.push(end_date);
+      paramIndex++;
+    } else if (start_date) {
+      conditions.push(`${columnName} >= $${paramIndex}`);
+      params.push(start_date);
+      paramIndex++;
+    } else if (end_date) {
+      conditions.push(`${columnName} <= $${paramIndex}`);
+      params.push(end_date);
+      paramIndex++;
+    } else if (month) {
+      let m;
+      let y;
+      if (year) {
+        m = parseInt(month);
+        y = parseInt(year);
+      } else if (month.includes('-')) {
+        const [yearPart, monthPart] = month.split('-');
+        m = parseInt(monthPart);
+        y = parseInt(yearPart);
+      } else {
+        const currentYear = new Date().getFullYear();
+        m = parseInt(month);
+        y = currentYear;
+      }
+      conditions.push(`EXTRACT(MONTH FROM ${columnName}) = $${paramIndex}`);
+      params.push(m);
+      paramIndex++;
+      conditions.push(`EXTRACT(YEAR FROM ${columnName}) = $${paramIndex}`);
+      params.push(y);
+      paramIndex++;
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+    return { whereClause, params };
+  };
+
+  const taskFilter = buildDateFilter('task_date');
+  const transactionFilter = buildDateFilter('transaction_date');
+
+  const tasksResult = await pool.query(
+    `SELECT * FROM tasks ${taskFilter.whereClause} ORDER BY task_date DESC`,
+    taskFilter.params
+  );
+
+  const transactionsResult = await pool.query(
+    `SELECT * FROM transactions ${transactionFilter.whereClause} ORDER BY transaction_date DESC`,
+    transactionFilter.params
+  );
+
+  // Calculate totals
+  const incomeTotal = transactionsResult.rows
+    .filter(t => t.type === 'income')
+    .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+    +
+    tasksResult.rows
+      .filter(t => t.type === 'income')
+      .reduce((sum, t) => sum + parseFloat(t.cost || 0), 0);
+
+  const expenseTotal = transactionsResult.rows
+    .filter(t => t.type === 'expense')
+    .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+    +
+    tasksResult.rows
+      .filter(t => t.type === 'expense')
+      .reduce((sum, t) => sum + parseFloat(t.cost || 0), 0);
+
+  successResponse(res, 200, {
+    project: {
+      ...project,
+      period: {
+        month: month || null,
+        year: year || null,
+        start_date: start_date || null,
+        end_date: end_date || null,
+      },
+      tasks: tasksResult.rows,
+      transactions: transactionsResult.rows,
+      totals: {
+        income: incomeTotal,
+        expense: expenseTotal,
+        balance: incomeTotal - expenseTotal,
+      },
+    },
+  }, 'Project financial report retrieved successfully');
+}));
+
+// @route   GET /api/reports/project/:id/export
+// @desc    Generate and download a PDF financial report for a specific project
+// @access  Private
+router.get('/project/:id/export', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { month, year, start_date, end_date } = req.query;
+
+  // Reuse the financial JSON endpoint to get data
+  req.params.id = id;
+  req.query.month = month;
+  req.query.year = year;
+  req.query.start_date = start_date;
+  req.query.end_date = end_date;
+
+  // Manually call the handler logic without sending response yet
+  const userId = req.user.id;
+  const role = req.user.role;
+
+  const projectResult = await pool.query(
+    'SELECT * FROM projects WHERE id = $1',
+    [id]
+  );
+
+  if (projectResult.rows.length === 0) {
+    return errorResponse(res, 404, 'Project not found');
+  }
+
+  const project = projectResult.rows[0];
+
+  if (role !== 'admin' && project.user_id !== userId) {
+    return errorResponse(res, 403, 'Access denied');
+  }
+
+  // Reuse same filter builder as /project/:id/financial, but inline to keep file self-contained
+  const buildDateFilter = (columnName) => {
+    const conditions = ['project_id = $1'];
+    const params = [id];
+    let paramIndex = 2;
+
+    if (start_date && end_date) {
+      conditions.push(`${columnName} >= $${paramIndex}`);
+      params.push(start_date);
+      paramIndex++;
+      conditions.push(`${columnName} <= $${paramIndex}`);
+      params.push(end_date);
+      paramIndex++;
+    } else if (start_date) {
+      conditions.push(`${columnName} >= $${paramIndex}`);
+      params.push(start_date);
+      paramIndex++;
+    } else if (end_date) {
+      conditions.push(`${columnName} <= $${paramIndex}`);
+      params.push(end_date);
+      paramIndex++;
+    } else if (month) {
+      let m;
+      let y;
+      if (year) {
+        m = parseInt(month);
+        y = parseInt(year);
+      } else if (month.includes('-')) {
+        const [yearPart, monthPart] = month.split('-');
+        m = parseInt(monthPart);
+        y = parseInt(yearPart);
+      } else {
+        const currentYear = new Date().getFullYear();
+        m = parseInt(month);
+        y = currentYear;
+      }
+      conditions.push(`EXTRACT(MONTH FROM ${columnName}) = $${paramIndex}`);
+      params.push(m);
+      paramIndex++;
+      conditions.push(`EXTRACT(YEAR FROM ${columnName}) = $${paramIndex}`);
+      params.push(y);
+      paramIndex++;
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+    return { whereClause, params };
+  };
+
+  const taskFilter = buildDateFilter('task_date');
+  const transactionFilter = buildDateFilter('transaction_date');
+
+  const tasksResult = await pool.query(
+    `SELECT * FROM tasks ${taskFilter.whereClause} ORDER BY task_date DESC`,
+    taskFilter.params
+  );
+
+  const transactionsResult = await pool.query(
+    `SELECT * FROM transactions ${transactionFilter.whereClause} ORDER BY transaction_date DESC`,
+    transactionFilter.params
+  );
+
+  const incomeTotal = transactionsResult.rows
+    .filter(t => t.type === 'income')
+    .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+    +
+    tasksResult.rows
+      .filter(t => t.type === 'income')
+      .reduce((sum, t) => sum + parseFloat(t.cost || 0), 0);
+
+  const expenseTotal = transactionsResult.rows
+    .filter(t => t.type === 'expense')
+    .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0)
+    +
+    tasksResult.rows
+      .filter(t => t.type === 'expense')
+      .reduce((sum, t) => sum + parseFloat(t.cost || 0), 0);
+
+  const balanceTotal = incomeTotal - expenseTotal;
+
+  // Create PDF
+  const doc = new PDFDocument({ margin: 40 });
+
+  const filename = `project_${project.id}_report.pdf`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/pdf');
+
+  doc.pipe(res);
+
+  // Colors for theme
+  const primaryBlue = '#1d4ed8';   // blue-700
+  const accentYellow = '#facc15';  // yellow-400
+  const incomeGreen = '#16a34a';   // green-600
+  const expenseRed = '#dc2626';    // red-600
+
+  // Page border (blue outer border with yellow inner accent)
+  const pageInnerX = doc.page.margins.left - 10;
+  const pageInnerY = doc.page.margins.top - 20;
+  const pageInnerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right + 20;
+  const pageInnerHeight = doc.page.height - doc.page.margins.top - doc.page.margins.bottom + 30;
+
+  // Outer blue border
+  doc
+    .save()
+    .lineWidth(2)
+    .strokeColor(primaryBlue)
+    .roundedRect(pageInnerX, pageInnerY, pageInnerWidth, pageInnerHeight, 10)
+    .stroke()
+    .restore();
+
+  // Inner yellow border
+  doc
+    .save()
+    .lineWidth(1)
+    .strokeColor(accentYellow)
+    .roundedRect(pageInnerX + 4, pageInnerY + 4, pageInnerWidth - 8, pageInnerHeight - 8, 8)
+    .stroke()
+    .restore();
+
+  // Header bar
+  doc
+    .save()
+    .rect(doc.page.margins.left, doc.page.margins.top - 10, doc.page.width - doc.page.margins.left - doc.page.margins.right, 40)
+    .fill(primaryBlue)
+    .restore();
+
+  doc
+    .fillColor('#ffffff')
+    .fontSize(20)
+    .text('Project Financial Report', {
+      align: 'left',
+      continued: false,
+      lineGap: 6,
+    });
+
+  doc.moveDown(1.5);
+
+  // Project information
+  doc.fillColor('#111827').fontSize(12);
+  doc.text(`Project: ${project.project_name}`);
+  if (project.description) {
+    doc.text(`Description: ${project.description}`);
+  }
+  doc.text(`Generated At: ${new Date().toISOString()}`);
+  if (start_date || end_date || month) {
+    doc.text(
+      `Period: ${
+        start_date || end_date
+          ? `${start_date || '...'} to ${end_date || '...'}`
+          : month && year
+          ? `${month}/${year}`
+          : month
+          ? month
+          : 'All'
+      }`
+    );
+  } else {
+    doc.text('Period: All time');
+  }
+
+  doc.moveDown();
+  // Summary card with yellow background
+  const summaryX = doc.page.margins.left;
+  const summaryY = doc.y;
+  const summaryWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const summaryHeight = 80;
+
+  doc
+    .save()
+    .roundedRect(summaryX, summaryY, summaryWidth, summaryHeight, 8)
+    .fill(accentYellow + '80') // semi-transparent yellow
+    .restore();
+
+  doc.moveDown(0.3);
+  doc.fontSize(14).fillColor(primaryBlue).text('Summary', summaryX + 10, summaryY + 8);
+
+  doc.fontSize(12);
+  doc.moveDown(0.5);
+
+  // Income (green), Expense (red), Balance (green or red)
+  doc
+    .fillColor(incomeGreen)
+    .text(`Total Income: ${incomeTotal.toFixed(2)} RWF`, summaryX + 10, summaryY + 30);
+
+  doc
+    .fillColor(expenseRed)
+    .text(`Total Expense: ${expenseTotal.toFixed(2)} RWF`, summaryX + 10, summaryY + 46);
+
+  doc
+    .fillColor(balanceTotal >= 0 ? incomeGreen : expenseRed)
+    .text(`Balance: ${balanceTotal.toFixed(2)} RWF`, summaryX + 10, summaryY + 62);
+
+  doc.moveDown(5);
+
+  doc.moveDown();
+  // Tasks section
+  doc.fontSize(14).fillColor(primaryBlue).text('Tasks');
+  doc.moveDown(0.5);
+  if (tasksResult.rows.length === 0) {
+    doc.fontSize(12).fillColor('#4b5563').text('No tasks for selected period.');
+  } else {
+    tasksResult.rows.forEach((t) => {
+      doc
+        .fontSize(12)
+        .fillColor('#111827')
+        .text(
+          `- [${t.task_date || 'N/A'}] ${t.task_name} (${t.type || 'N/A'}): ${t.cost || 0} RWF`
+        );
+      if (t.description) {
+        doc.fontSize(10).fillColor('#6b7280').text(`  ${t.description}`);
+      }
+    });
+  }
+
+  doc.moveDown();
+  // Transactions section
+  doc.fontSize(14).fillColor(primaryBlue).text('Transactions');
+  doc.moveDown(0.5);
+  if (transactionsResult.rows.length === 0) {
+    doc.fontSize(12).fillColor('#4b5563').text('No transactions for selected period.');
+  } else {
+    transactionsResult.rows.forEach((tr) => {
+      doc
+        .fontSize(12)
+        .fillColor('#111827')
+        .text(
+          `- [${tr.transaction_date || 'N/A'}] ${tr.type || 'N/A'}: ${tr.amount || 0} RWF`
+        );
+      if (tr.description) {
+        doc.fontSize(10).fillColor('#6b7280').text(`  ${tr.description}`);
+      }
+    });
+  }
+
+  doc.end();
 }));
 
 // @route   GET /api/reports/dashboard

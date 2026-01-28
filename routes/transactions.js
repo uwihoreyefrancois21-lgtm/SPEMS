@@ -5,6 +5,7 @@ const { asyncHandler, successResponse, errorResponse } = require('../utils/helpe
 const { authenticate } = require('../middleware/auth');
 
 // Helper function to check project access
+// Admins can only access their own projects, not other users' projects
 const checkProjectAccess = async (projectId, userId, role) => {
   const projectCheck = await pool.query(
     'SELECT user_id FROM projects WHERE id = $1',
@@ -15,7 +16,8 @@ const checkProjectAccess = async (projectId, userId, role) => {
     return { authorized: false, error: 'Project not found' };
   }
 
-  if (role !== 'admin' && projectCheck.rows[0].user_id !== userId) {
+  // All users (including admins) can only access their own projects
+  if (projectCheck.rows[0].user_id !== userId) {
     return { authorized: false, error: 'Access denied to this project' };
   }
 
@@ -67,10 +69,10 @@ const updateProjectTotals = async (projectId) => {
 };
 
 // @route   GET /api/transactions
-// @desc    Get all transactions (can filter by project_id and month)
+// @desc    Get all transactions (can filter by project_id, month/year, or date range)
 // @access  Private
 router.get('/', authenticate, asyncHandler(async (req, res) => {
-  const { project_id, month, year } = req.query;
+  const { project_id, month, year, start_date, end_date } = req.query;
   const userId = req.user.id;
   const role = req.user.role;
 
@@ -81,7 +83,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 
   // Handle project_id filter
   if (project_id) {
-    // Check project access
+    // Check project access (admins can only access their own projects)
     const accessCheck = await checkProjectAccess(project_id, userId, role);
     if (!accessCheck.authorized) {
       return errorResponse(res, 403, accessCheck.error);
@@ -89,15 +91,33 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     whereConditions.push(`t.project_id = $${paramIndex}`);
     queryParams.push(project_id);
     paramIndex++;
-  } else if (role !== 'admin') {
-    // Non-admin users see only their projects
+  } else {
+    // All users (including admins) see only their own projects
     whereConditions.push(`p.user_id = $${paramIndex}`);
     queryParams.push(userId);
     paramIndex++;
   }
 
-  // Handle month filter (format: YYYY-MM or just month number 1-12)
-  if (month) {
+  // Handle date range filter (takes priority over month/year if both are provided)
+  if (start_date && end_date) {
+    whereConditions.push(`t.transaction_date >= $${paramIndex}`);
+    queryParams.push(start_date);
+    paramIndex++;
+    whereConditions.push(`t.transaction_date <= $${paramIndex}`);
+    queryParams.push(end_date);
+    paramIndex++;
+  } else if (start_date) {
+    // Only start date provided
+    whereConditions.push(`t.transaction_date >= $${paramIndex}`);
+    queryParams.push(start_date);
+    paramIndex++;
+  } else if (end_date) {
+    // Only end date provided
+    whereConditions.push(`t.transaction_date <= $${paramIndex}`);
+    queryParams.push(end_date);
+    paramIndex++;
+  } else if (month) {
+    // Handle month filter (format: YYYY-MM or just month number 1-12)
     if (year) {
       // Both month and year provided (e.g., month=1, year=2024)
       whereConditions.push(`EXTRACT(MONTH FROM t.transaction_date) = $${paramIndex}`);
@@ -166,8 +186,8 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
 
   const transaction = transactionResult.rows[0];
 
-  // Check if user has access
-  if (role !== 'admin' && transaction.project_owner_id !== userId) {
+  // Check if user has access (admins can only access their own projects)
+  if (transaction.project_owner_id !== userId) {
     return errorResponse(res, 403, 'Access denied');
   }
 
@@ -284,7 +304,8 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
     return errorResponse(res, 404, 'Transaction not found');
   }
 
-  if (role !== 'admin' && transactionResult.rows[0].project_owner_id !== userId) {
+  // Check if user has access (admins can only access their own projects)
+  if (transactionResult.rows[0].project_owner_id !== userId) {
     return errorResponse(res, 403, 'Access denied');
   }
 

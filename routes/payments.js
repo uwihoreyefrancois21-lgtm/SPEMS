@@ -86,6 +86,51 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
   }, 'Payments retrieved successfully');
 }));
 
+// @route   GET /api/payments/my-status
+// @desc    Get payment status for the current user (last payment, block date, days until block)
+// @access  Private
+router.get('/my-status', authenticate, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+
+  // Last paid payment (any time)
+  const lastPaidResult = await pool.query(
+    `SELECT paid_at 
+     FROM user_payments 
+     WHERE user_id = $1 AND status = 'paid' AND paid_at IS NOT NULL
+     ORDER BY paid_at DESC
+     LIMIT 1`,
+    [userId]
+  );
+
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+
+  let lastPaymentAt = null;
+  let blockDate = null;
+  let daysUntilBlock = 0;
+
+  if (lastPaidResult.rows.length > 0) {
+    const paidAt = new Date(lastPaidResult.rows[0].paid_at);
+    lastPaymentAt = paidAt.toISOString();
+
+    const block = new Date(paidAt);
+    block.setDate(block.getDate() + 30);
+    blockDate = block.toISOString();
+
+    const diffMs = block.getTime() - now.getTime();
+    daysUntilBlock = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+  }
+
+  const status = daysUntilBlock > 0 ? 'active' : 'blocked';
+
+  successResponse(res, 200, {
+    status,
+    last_payment_at: lastPaymentAt,
+    block_date: blockDate,
+    days_until_block: daysUntilBlock,
+  }, 'Payment status retrieved successfully');
+}));
+
 // @route   GET /api/payments/:id
 // @desc    Get single payment by ID
 // @access  Private
