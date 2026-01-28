@@ -231,6 +231,31 @@ router.get('/project/:id/export', authenticate, asyncHandler(async (req, res) =>
     return errorResponse(res, 403, 'Access denied');
   }
 
+  // Date formatting helpers for PDF (avoid raw ISO strings / timezones)
+  const formatDateTime = (value) => {
+    if (!value) return 'N/A';
+    const d = value instanceof Date ? value : new Date(value);
+    const day = String(d.getDate()).padStart(2, '0');
+    const monthNum = String(d.getMonth() + 1).padStart(2, '0');
+    const yearNum = d.getFullYear();
+    let hours = d.getHours();
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    if (hours === 0) hours = 12;
+    const hourStr = String(hours).padStart(2, '0');
+    return `${day}/${monthNum}/${yearNum} ${hourStr}:${minutes} ${ampm}`;
+  };
+
+  const formatDateOnly = (value) => {
+    if (!value) return 'N/A';
+    const d = value instanceof Date ? value : new Date(value);
+    const day = String(d.getDate()).padStart(2, '0');
+    const monthNum = String(d.getMonth() + 1).padStart(2, '0');
+    const yearNum = d.getFullYear();
+    return `${day}/${monthNum}/${yearNum}`;
+  };
+
   // Reuse same filter builder as /project/:id/financial, but inline to keep file self-contained
   const buildDateFilter = (columnName) => {
     const conditions = ['project_id = $1'];
@@ -373,18 +398,22 @@ router.get('/project/:id/export', authenticate, asyncHandler(async (req, res) =>
   if (project.description) {
     doc.text(`Description: ${project.description}`);
   }
-  doc.text(`Generated At: ${new Date().toISOString()}`);
+  doc.text(`Generated At: ${formatDateTime(new Date())}`);
   if (start_date || end_date || month) {
+    let periodLabel;
+    if (start_date || end_date) {
+      const startLabel = start_date ? formatDateOnly(start_date) : '...';
+      const endLabel = end_date ? formatDateOnly(end_date) : '...';
+      periodLabel = `${startLabel} to ${endLabel}`;
+    } else if (month && year) {
+      periodLabel = `${month}/${year}`;
+    } else if (month) {
+      periodLabel = `${month}`;
+    } else {
+      periodLabel = 'All';
+    }
     doc.text(
-      `Period: ${
-        start_date || end_date
-          ? `${start_date || '...'} to ${end_date || '...'}`
-          : month && year
-          ? `${month}/${year}`
-          : month
-          ? month
-          : 'All'
-      }`
+      `Period: ${periodLabel}`
     );
   } else {
     doc.text('Period: All time');
@@ -431,12 +460,12 @@ router.get('/project/:id/export', authenticate, asyncHandler(async (req, res) =>
   if (tasksResult.rows.length === 0) {
     doc.fontSize(12).fillColor('#4b5563').text('No tasks for selected period.');
   } else {
-    tasksResult.rows.forEach((t) => {
+    tasksResult.rows.forEach((t, index) => {
       doc
         .fontSize(12)
         .fillColor('#111827')
         .text(
-          `- [${t.task_date || 'N/A'}] ${t.task_name} (${t.type || 'N/A'}): ${t.cost || 0} RWF`
+          `${index + 1}. Date: ${formatDateOnly(t.task_date)}  -  ${t.task_name} (${t.type || 'N/A'}): ${t.cost || 0} RWF`
         );
       if (t.description) {
         doc.fontSize(10).fillColor('#6b7280').text(`  ${t.description}`);
@@ -451,12 +480,12 @@ router.get('/project/:id/export', authenticate, asyncHandler(async (req, res) =>
   if (transactionsResult.rows.length === 0) {
     doc.fontSize(12).fillColor('#4b5563').text('No transactions for selected period.');
   } else {
-    transactionsResult.rows.forEach((tr) => {
+    transactionsResult.rows.forEach((tr, index) => {
       doc
         .fontSize(12)
         .fillColor('#111827')
         .text(
-          `- [${tr.transaction_date || 'N/A'}] ${tr.type || 'N/A'}: ${tr.amount || 0} RWF`
+          `${index + 1}. Date: ${formatDateOnly(tr.transaction_date)}  -  ${tr.type || 'N/A'}: ${tr.amount || 0} RWF`
         );
       if (tr.description) {
         doc.fontSize(10).fillColor('#6b7280').text(`  ${tr.description}`);
